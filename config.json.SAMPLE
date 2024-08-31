@@ -1,8 +1,0 @@
-{
- "token": "SOME_TELEGRAM_API_TOKEN",
- "latency": 0.05,
- "subjects": {
-  "LESSON_1": -1,
-  "LESSON_2": -3
- }
-}
