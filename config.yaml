@@ -1,0 +1,102 @@
+# Промежуток времени, за который ожидаются фото последнего сообщения (сек). Увеличить, если не все фото пересылаются.
+latency:
+  0.05
+
+# Список чатов. Название должно быть на момент добавления бота в чат.
+chats:
+  - &MathsChat
+    "Сириус (бот) математика"
+  - &PhysicsChat
+    "Сириус (бот) физика"
+  - &InformaticsChat
+    "Сириус (бот) информатика"
+  - &BiologyChat
+    "Сириус (бот) биология"
+  - &ChemistryChat
+    "Сириус (бот) химия"
+  - &OtherChat
+    "Сириус (бот) другое"
+
+# Вопросы о проблеме
+lesson:
+  question: Какой урок (номер)?
+  resend_question: "Введите номер:"
+  field: "lesson"
+  type: int
+
+grade:
+  question: Какой класс (номер)?
+  resend_question: "Введите номер класса:"
+  field: "grade"
+  next: lesson
+  options: 
+    - text: "7"
+    - text: "8"
+    - text: "10"
+    - text: "11"
+
+grade_phys_inf:
+  question: Какой класс (номер)?
+  resend_question: "Введите номер класса:"
+  field: "grade"
+  next: lesson
+  options: 
+    - text: "7"
+    - text: "8"
+    - text: "10"
+      next:
+        question: "В материалах какого профильного класса была найдена ошибка?"
+        field: "grade"
+        resend_question: "Введите номер профильного класса:"
+        next: lesson
+        options:
+          - text: "10ФМ"
+          - text: "10ИМ"
+    - text: "11"
+      next:
+        question: "В материалах какого профильного класса была найдена ошибка?"
+        field: "grade"
+        resend_question: "Введите номер профильного класса:"
+        next: lesson
+        options:
+          - text: "11ФМ"
+          - text: "11ИМ"
+
+
+# Диалоговое дерево
+tree:
+  question: С каким вопросом вы хотите обратиться?
+  resend_question: "Выберите проблему из списка:"
+  field: type
+  options:
+    - text: ошибка в учебных материалах
+      next:
+        question: Какой предмет вас интересует?
+        resend_question: "Предмет не из списка:"
+        field: "subject"
+        next: grade
+        options:
+          - text: Математика
+            chat: *MathsChat
+            next:
+              question: "Выберите учебную дисциплину:"
+              field: "discipline"
+              resend_question: "Дисциплина не из списка:"
+              next: grade
+              options:
+                - text: Алгебра
+                - text: Геометрия
+                - text: Вероятность
+                - text: Статистика
+          - text: Физика
+            next: grade_phys_inf
+            chat: *PhysicsChat
+          - text: Информатика
+            next: grade_phys_inf
+            chat: *InformaticsChat
+          - text: Биология
+            chat: *BiologyChat
+          - text: Химия
+            chat: *ChemistryChat
+    - text: другое
+      chat: *OtherChat

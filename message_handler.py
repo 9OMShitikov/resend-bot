@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from typing import Optional
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart, Filter
@@ -13,10 +14,9 @@ from aiogram.types import (
     InputMediaPhoto,
 )
 import config
+import dialogue_tree
 
 form_router = Router()
-
-situations = ["Была найдена опечатка", "Другое"]
 
 
 # Проверка, что сообщение от пользователя, а не из чата учителей
@@ -25,50 +25,32 @@ class SubjFilter(Filter):
         return message.chat.id not in config.config.chats.values()
 
 
+# Максимальное суммарное к-во символов в кнопках строки
+TG_LINE_LEN = 10
+
+
 # Состояния чата пользователя:
 class Form(StatesGroup):
-    # вопрос о предмете
-    subject = State()
-    # вопрос о ситуации (опечатка, нет)
-    situation = State()
-    # если опечатка, какой класс
-    where_grade = State()
-    # если опечатка, какой урок
-    where_lesson = State()
+    # дерево диалога
+    tree = State()
     # какая именно проблема (пересылаемое сообщение с фото)
     what = State()
 
 
-# `кнопки` с названиями предметов (т.к. список подгружается из конфига, то функция)
-def get_subj_markup():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text=subj),
-            ]
-            for subj in config.config.subjects
-        ],
-        resize_keyboard=True,
-    )
+# `кнопки` с вариантами ответов
+def get_opt_markup(node: dialogue_tree.DialogueNode):
+    if node.options:
+        options = node.options.keys()
+        if sum(map(len, options)) > TG_LINE_LEN:
+            keyboard = [[KeyboardButton(text=opt)] for opt in options]
+        else:
+            keyboard = [[KeyboardButton(text=opt) for opt in options]]
 
-
-# `кнопки` с ситуациями
-situation_markup = ReplyKeyboardMarkup(
-    keyboard=[
-        [
-            KeyboardButton(text=theme),
-        ]
-        for theme in situations
-    ],
-    resize_keyboard=True,
-)
-
-
-# `кнопки` с номерами класса
-grade_markup = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text=str(i)) for i in [7, 8, 10, 11]]],
-    resize_keyboard=True,
-)
+        return ReplyKeyboardMarkup(
+            keyboard=keyboard,
+            resize_keyboard=True,
+        )
+    return ReplyKeyboardRemove()
 
 
 # `кнопка` старта
@@ -82,7 +64,7 @@ start_markup = ReplyKeyboardMarkup(
 )
 
 
-# Начало общения (или после нажатия на старт), вопрос о предмете
+# Начало общения (или после нажатия на старт)
 @form_router.message(CommandStart(), SubjFilter())
 @form_router.message(Command("start"), SubjFilter())
 @form_router.message(F.text.casefold() == "start", SubjFilter())
@@ -93,88 +75,68 @@ async def command_start(message: Message, state: FSMContext) -> None:
         )
     )
     await state.clear()
-    await state.set_state(Form.subject)
-    await state.update_data(lock=asyncio.Lock())
+    await state.update_data(node=None, next=None, fields={}, lock=asyncio.Lock())
+    await state.set_state(Form.tree)
+    await process_msg(message, state, node=config.config.tree)
+
+
+# вопрос диалога
+async def process_msg(
+    message: Message, state: FSMContext, node: dialogue_tree.DialogueNode
+) -> None:
+    await state.update_data(node=node, next=node.next)
     await message.answer(
-        "Какой предмет вас интересует?", reply_markup=get_subj_markup()
+        node.question,
+        reply_markup=get_opt_markup(node),
     )
 
 
-# Обработка полученного предмета, вопрос о проблеме
-@form_router.message(Form.subject, SubjFilter())
-async def process_subject(message: Message, state: FSMContext) -> None:
-    subj = message.text
-    if chat_name := config.config.subjects.get(subj):
-        # Нашли название чата предмета, ищем соответствующий id
-        if chat_id := config.config.chats.get(chat_name):
-            # Нашли id предмета, обновляем состояние
-            await state.update_data(subject=subj)
-            await state.update_data(chat_id=chat_id)
-            await state.set_state(Form.situation)
-            await message.answer(
-                "Какая возникла проблема?", reply_markup=situation_markup
-            )
+# неправильный ответ на вопрос диалога
+async def process_resend(message: Message, node: dialogue_tree.DialogueNode) -> None:
+    question = node.resend_question
+    if question is None:
+        question = node.question
+    await message.reply(
+        question,
+        reply_markup=get_opt_markup(node),
+    )
+
+
+# обработка полученного ответа, вопрос о проблеме
+@form_router.message(Form.tree, SubjFilter())
+async def process_answer(message: Message, state: FSMContext) -> None:
+    answer = message.text
+    state_data = await state.get_data()
+    node: Optional[dialogue_tree.DialogueNode] = state_data.get("node")
+    next: Optional[dialogue_tree.DialogueNode] = state_data.get("next")
+    fields = state_data["fields"]
+    if node is not None:
+        if node.options is not None:
+            if option := node.options.get(answer):
+                if option.chat:
+                    await state.update_data(chat_id=option.chat)
+                if node.field:
+                    fields[node.field] = answer
+                    await state.update_data(fields=fields)
+                if option.next is not None:
+                    next = option.next
+                if next is not None:
+                    await process_msg(message, state, next)
+                else:
+                    await process_ask(message, state)
+            else:
+                await process_resend(message, node)
         else:
-            # Нашли название чата предмета, но в списке чатов бота такого нет
-            logging.info(
-                "chat {} corresponding to {} doesn't correspond to any of chat ids".format(
-                    chat_name, subj
-                )
-            )
-            await message.reply(
-                "Неверная внутренняя конфигурация, обратитесь к администратору:",
-                reply_markup=get_subj_markup(),
-            )
-    else:
-        await message.reply("Предмет не из списка:", reply_markup=get_subj_markup())
-
-
-# Пользователь сказал, что опечатка
-@form_router.message(Form.situation, F.text == "Была найдена опечатка", SubjFilter())
-async def process_typo(message: Message, state: FSMContext) -> None:
-    await state.update_data(typo=True)
-    await state.set_state(Form.where_grade)
-    await message.answer("Какой класс (номер)?", reply_markup=grade_markup)
-
-
-# Пользователь сказал, что опечатка, вопрос о классе
-@form_router.message(Form.where_grade, F.text.isdigit(), SubjFilter())
-async def process_typo_grade(message: Message, state: FSMContext) -> None:
-    await state.update_data(grade=int(message.text))
-    await state.set_state(Form.where_lesson)
-    await message.answer("Какой урок (номер)?", reply_markup=ReplyKeyboardRemove())
-
-
-# Пользователь сказал, что опечатка, вопрос о номере урока
-@form_router.message(Form.where_lesson, F.text.isdigit(), SubjFilter())
-async def process_typo_lesson(message: Message, state: FSMContext) -> None:
-    await state.update_data(lesson=int(message.text))
-    await process_ask(message=message, state=state)
-
-
-# Неправильный номер класса (не из списка)
-@form_router.message(Form.where_grade, SubjFilter())
-async def process_typo_grade_error(message: Message, state: FSMContext) -> None:
-    await message.reply("Введите номер класса:", reply_markup=grade_markup)
-
-
-# Неправильный номер урока (ненатуральное число)
-@form_router.message(Form.where_lesson, SubjFilter())
-async def process_typo_lesson_error(message: Message, state: FSMContext) -> None:
-    await message.reply("Введите номер", reply_markup=ReplyKeyboardRemove())
-
-
-# Не опечатка, другое
-@form_router.message(Form.situation, F.text == "Другое", SubjFilter())
-async def process_ask_other(message: Message, state: FSMContext) -> None:
-    await state.update_data(typo=False)
-    await process_ask(message=message, state=state)
-
-
-# Неправильный выбор ситуации (не из списка)
-@form_router.message(Form.situation, SubjFilter())
-async def process_ask_none(message: Message, state: FSMContext) -> None:
-    await message.reply("Выберите проблему из списка:", situation_markup)
+            if answer.isdigit():
+                if node.field:
+                    fields[node.field] = answer
+                    await state.update_data(fields=fields)
+                if next is not None:
+                    await process_msg(message, state, next)
+                else:
+                    await process_ask(message, state)
+            else:
+                await process_resend(message, node)
 
 
 # Вопрос о проблеме (с фото)
@@ -225,13 +187,15 @@ async def process_done(message: Message, state: FSMContext) -> None:
             )
         )
 
-        if data["typo"]:
-            problem = "опечатка, {} класс, {} урок".format(
-                data["grade"], data["lesson"]
-            )
+        fields = data["fields"]
+        if fields["type"] != "другое":
+            problem = "ошибка в учебных материалах\n"
+            if "discipline" in fields:
+                problem += "Дисциплина: {}\n".format(fields["discipline"])
+            problem += "Класс: {}\nУрок: {}\n".format(fields["grade"], fields["lesson"])
         else:
-            problem = "другое"
-        text = ("Пользователь: @{}, {}\nПроблема: {}\nТекст: {}").format(
+            problem = "другое\n"
+        text = ("Пользователь: @{}, {}\nПроблема: {}Текст: {}").format(
             message.from_user.username, message.from_user.url, problem, text
         )
 
